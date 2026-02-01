@@ -1,26 +1,28 @@
-import React, { useState } from 'react';
-import { AgentRole, AnalysisStatus, WorkflowState, AgentConfig, ApiKeys } from './types';
+import React, { useState, useEffect } from 'react';
+import { AgentRole, AnalysisStatus, WorkflowState, AgentConfig, ApiKeys, HistoryItem } from './types';
 import { runAnalystsStage, runManagersStage, runRiskStage, runGMStage } from './services/geminiService';
 import { fetchStockData, formatStockDataForPrompt } from './services/juheService';
+import {
+  getInitialState,
+  saveState,
+  clearState,
+  saveToHistory,
+  getHistory,
+  deleteFromHistory,
+  clearHistory,
+  restoreFromHistory
+} from './lib/storage';
 
 import StockInput from './components/StockInput';
 import AgentCard from './components/AgentCard';
 import { DEFAULT_AGENTS } from './constants';
-import { LayoutDashboard, BrainCircuit, ShieldCheck, Gavel, RefreshCw, AlertTriangle, Settings2, Database } from 'lucide-react';
-
-// 初始状态定义
-const initialState: WorkflowState = {
-  status: AnalysisStatus.IDLE,
-  currentStep: 0,
-  stockSymbol: '',
-  stockDataContext: '',
-  outputs: {},
-  agentConfigs: JSON.parse(JSON.stringify(DEFAULT_AGENTS)), // 深拷贝默认配置
-  apiKeys: {}
-};
+import { LayoutDashboard, BrainCircuit, ShieldCheck, Gavel, RefreshCw, AlertTriangle, Settings2, Database, History, Trash2, Clock, X } from 'lucide-react';
 
 const App: React.FC = () => {
-  const [state, setState] = useState<WorkflowState>(initialState);
+  const [state, setState] = useState<WorkflowState>(getInitialState);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [restoredDataWarning, setRestoredDataWarning] = useState(false);
 
   // 处理空闲状态下的配置修改（温度、模型等）
   const handleConfigChange = (role: AgentRole, newConfig: AgentConfig) => {
@@ -160,13 +162,72 @@ const App: React.FC = () => {
 
   // 重置系统状态
   const reset = () => {
+    clearState();
+    setRestoredDataWarning(false);
     // 保留用户自定义的配置(agentConfigs)和key，仅重置输出和状态
     setState(prev => ({
-      ...initialState,
-      agentConfigs: prev.agentConfigs, 
+      status: AnalysisStatus.IDLE,
+      currentStep: 0,
+      stockSymbol: '',
+      stockDataContext: '',
+      outputs: {},
+      agentConfigs: prev.agentConfigs,
       apiKeys: prev.apiKeys
     }));
   };
+
+  // 加载历史记录
+  const loadHistory = () => {
+    setHistory(getHistory());
+  };
+
+  // 从历史记录恢复
+  const handleRestoreFromHistory = (item: HistoryItem) => {
+    const restored = restoreFromHistory(item);
+    setState({
+      status: AnalysisStatus.IDLE,
+      currentStep: 0,
+      stockSymbol: restored.stockSymbol || '',
+      stockDataContext: '',
+      outputs: restored.outputs,
+      agentConfigs: restored.agentConfigs,
+      apiKeys: {}
+    });
+    setRestoredDataWarning(true);
+    setShowHistory(false);
+  };
+
+  // 删除历史记录
+  const handleDeleteHistory = (id: string) => {
+    deleteFromHistory(id);
+    loadHistory();
+  };
+
+  // 清空历史记录
+  const handleClearHistory = () => {
+    clearHistory();
+    loadHistory();
+  };
+
+  // 打开历史面板
+  const handleOpenHistory = () => {
+    loadHistory();
+    setShowHistory(true);
+  };
+
+  // 自动保存状态变化
+  useEffect(() => {
+    if (state.status !== AnalysisStatus.IDLE) {
+      saveState(state);
+    }
+  }, [state]);
+
+  // 分析完成后保存到历史记录
+  useEffect(() => {
+    if (state.status === AnalysisStatus.COMPLETED && state.stockSymbol) {
+      saveToHistory(state);
+    }
+  }, [state.status]);
 
   // 辅助函数：判断当前阶段是否正在加载
   const isStepLoading = (stepIndex: number) => state.status === AnalysisStatus.RUNNING && state.currentStep === stepIndex;
@@ -187,9 +248,13 @@ const App: React.FC = () => {
             </h1>
           </div>
           <div className="flex items-center gap-2 md:gap-4">
+             <button onClick={handleOpenHistory} className="flex items-center gap-1 md:gap-2 text-xs md:text-sm text-slate-400 hover:text-white transition-colors">
+                <History className="w-3 h-3 md:w-4 md:h-4" />
+                <span className="hidden md:inline">历史</span>
+             </button>
              {state.status !== AnalysisStatus.IDLE && (
                 <button onClick={reset} className="flex items-center gap-1 md:gap-2 text-xs md:text-sm text-slate-400 hover:text-white transition-colors border border-slate-700 rounded px-2 py-1 md:border-none">
-                    <RefreshCw className="w-3 h-3 md:w-4 md:h-4" /> 
+                    <RefreshCw className="w-3 h-3 md:w-4 md:h-4" />
                     <span className="hidden md:inline">重置系统</span>
                     <span className="md:hidden">重置</span>
                 </button>
@@ -241,6 +306,18 @@ const App: React.FC = () => {
                         <Database className="w-3 h-3 text-blue-500" />
                         <span>数据源: 聚合数据 API (Juhe Data) {state.stockDataContext.includes("无法获取") ? "(连接失败 - 使用AI估算)" : "(连接成功 - 实时数据已注入)"}</span>
                     </div>
+                    {/* 恢复数据警告提示 */}
+                    {restoredDataWarning && (
+                        <div className="flex items-center justify-between gap-2 text-[10px] md:text-xs text-amber-400 bg-amber-400/10 px-3 py-2 rounded border border-amber-500/20">
+                            <div className="flex items-center gap-2">
+                                <Clock className="w-3 h-3" />
+                                <span>已从历史记录恢复分析结果，股票数据可能已过期</span>
+                            </div>
+                            <button onClick={() => setRestoredDataWarning(false)} className="hover:text-amber-300">
+                                <X className="w-3 h-3" />
+                            </button>
+                        </div>
+                    )}
                  </div>
              )}
 
@@ -333,6 +410,103 @@ const App: React.FC = () => {
              </section>
         </div>
       </main>
+
+      {/* 历史记录侧边栏 */}
+      {showHistory && (
+        <div className="fixed inset-0 z-50 flex justify-end">
+          {/* 背景遮罩 */}
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setShowHistory(false)}
+          ></div>
+
+          {/* 侧边栏 */}
+          <div className="relative w-full max-w-md bg-slate-900 border-l border-slate-800 shadow-2xl flex flex-col h-full animate-slide-in-right">
+            {/* 头部 */}
+            <div className="flex items-center justify-between p-4 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <History className="w-5 h-5 text-blue-400" />
+                <h3 className="text-lg font-bold text-white">分析历史</h3>
+                <span className="text-xs text-slate-500">({history.length})</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {history.length > 0 && (
+                  <button
+                    onClick={handleClearHistory}
+                    className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    清空
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="text-slate-400 hover:text-white transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* 历史列表 */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {history.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-slate-500">
+                  <History className="w-12 h-12 mb-3 opacity-50" />
+                  <p className="text-sm">暂无历史记录</p>
+                  <p className="text-xs mt-1">完成分析后会自动保存</p>
+                </div>
+              ) : (
+                history.map((item) => (
+                  <div
+                    key={item.id}
+                    className="bg-slate-800/50 rounded-lg p-3 border border-slate-700 hover:border-slate-600 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-mono text-sm font-bold text-blue-400">
+                            {item.stockSymbol.toUpperCase()}
+                          </span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${
+                            item.gmDecision === '买入' ? 'bg-green-500/20 text-green-400' :
+                            item.gmDecision === '卖出' ? 'bg-red-500/20 text-red-400' :
+                            'bg-amber-500/20 text-amber-400'
+                          }`}>
+                            {item.gmDecision || '分析中'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                          <span>{new Date(item.timestamp).toLocaleString()}</span>
+                          {item.completedAt && (
+                            <span className="text-green-500">已完成</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => handleRestoreFromHistory(item)}
+                          className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-slate-700 rounded transition-colors"
+                          title="恢复此分析"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteHistory(item.id)}
+                          className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-slate-700 rounded transition-colors"
+                          title="删除"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
